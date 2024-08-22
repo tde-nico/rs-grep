@@ -3,6 +3,7 @@ use std::io;
 use std::process;
 use std::str::Chars;
 
+#[derive(Debug)]
 #[derive(Clone)]
 enum Pattern {
 	Literal(char),
@@ -14,6 +15,7 @@ enum Pattern {
 	Option(char),
 	Wildcard,
 	Or(Vec<Vec<Pattern>>),
+	BackRef(Vec<Vec<Pattern>>),
 }
 
 fn match_literal(chars: &mut Chars, literal: char) -> bool {
@@ -57,7 +59,40 @@ fn build_group(it: &mut Chars) -> (bool, String) {
 	return (positive, group);
 }
 
-fn build_patterrns(pattern: &str) -> Vec<Pattern> {
+// echo -n "'cat and cat' is the same as 'cat and cat'" | ./your_program.sh -E "('(cat) and \2') is the same as \1"
+
+fn find_or(patterns: &[Pattern], back_ref: &mut u32, ors: &mut u32) -> Option<Vec<Vec<Pattern>>> {
+	let mut sub = None;
+	for p in patterns.iter() {
+		// println!("pat: {:?}", p);
+		match p {
+			Pattern::Or(sub_patterns) => {
+				*back_ref -= 1;
+				sub = Some(sub_patterns);
+				// println!("back_ref {} {} {:?}", *back_ref, *ors, sub.unwrap());
+				if *back_ref - *ors < 1 {
+					break ;
+				}
+				*ors += 1;
+				for s in sub_patterns.iter() {
+					let tmp = find_or(s, back_ref, ors);
+					// println!("ret: {:?}", tmp);
+					if tmp.is_some() {
+						return tmp
+					}
+				}
+			},
+			_ => {},
+		}
+	}
+	// println!("bref {} {}, {} != 0 -> {}", *back_ref, *ors, *back_ref + 1 - *ors, *back_ref + 1 - *ors != 0);
+	if *back_ref - *ors!= 0 {
+		return None;
+	}
+	Some(sub.unwrap().clone())
+}
+
+fn build_patterrns(pattern: &str, ors: &mut u32) -> Vec<Pattern> {
 	let mut it = pattern.chars();
 	let mut patterns = Vec::new();
 	loop {
@@ -75,7 +110,17 @@ fn build_patterrns(pattern: &str) -> Vec<Pattern> {
 					'd' => Pattern::Digit,
 					'w' => Pattern::Alphanumeric,
 					'\\' => Pattern::Literal('\\'),
-					_ => panic!("Unknown special character"),
+					l => {
+						if !l.is_digit(10) {
+							panic!("Unknown special character")
+						}
+						let mut back_ref = l as u32 - 0x30;
+						let or = find_or(&patterns, &mut back_ref, ors);
+						if or.is_none() {
+							panic!("Invalid back reference");
+						}
+						Pattern::BackRef(or.unwrap())
+					}
 				}
 			}
 			'[' => {
@@ -87,19 +132,30 @@ fn build_patterrns(pattern: &str) -> Vec<Pattern> {
 			'(' => {
 				let mut clone = it.clone();
 				let mut len = 0;
-				while clone.clone().next().is_some_and(|c| c != ')') {
-					clone.next();
+				let mut counter = 0;
+				// println!("or");
+				while clone.clone().next().is_some_and(|c| c != ')' || counter > 0) {
+					let next = clone.next();
+					if next.is_some_and(|c| c == '(') {
+						counter += 1;
+					} else if next.is_some_and(|c| c == ')') {
+						counter -= 1;
+					}
+					// println!("{}", next.unwrap());
 					len += 1;
 				}
-				if clone.clone().next().is_none() {
+				if clone.next().is_none() {
 					panic!("Unmatched '('");
 				}
 				let sub_pattern = it.as_str()[..len].to_string();
+				it = clone;
 				let subs = sub_pattern.split('|');
 				let mut or_patterns = Vec::new();
+				*ors += 1;
 				for sub in subs {
-					or_patterns.push(build_patterrns(sub));
+					or_patterns.push(build_patterrns(sub, ors));
 				}
+				*ors -= 1;
 				Pattern::Or(or_patterns)
 			}
 			l => {
@@ -115,11 +171,13 @@ fn build_patterrns(pattern: &str) -> Vec<Pattern> {
 			}
 		});
 	}
+	// println!("{:?}", patterns);
 	return patterns;
 }
 
 fn match_pattern_from(it: &mut Chars, patterns: &Vec<Pattern>) -> bool {
 	for p in patterns.iter() {
+		// println!("{:?}", p);
 		match p {
 			Pattern::Literal(l) => {
 				if !match_literal(it, *l) {
@@ -166,7 +224,7 @@ fn match_pattern_from(it: &mut Chars, patterns: &Vec<Pattern>) -> bool {
 					return false;
 				}
 			}
-			Pattern::Or(sub_patterns) => {
+			Pattern::Or(sub_patterns) | Pattern::BackRef(sub_patterns) => {
 				let mut clone = it.clone();
 				let mut matched = false;
 				for sub in sub_patterns.iter() {
@@ -177,8 +235,8 @@ fn match_pattern_from(it: &mut Chars, patterns: &Vec<Pattern>) -> bool {
 					}
 					clone = it.clone();
 				}
-				if matched {
-					return true;
+				if !matched {
+					return false;
 				}
 			}
 		}
@@ -188,11 +246,12 @@ fn match_pattern_from(it: &mut Chars, patterns: &Vec<Pattern>) -> bool {
 
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
 	let input_line = input_line.trim_matches('\n');
+	let mut ors = 0;
 	if pattern.chars().nth(0) == Some('^') {
-		let patterns = build_patterrns(&pattern[1..]);
+		let patterns = build_patterrns(&pattern[1..], &mut ors);
 		return match_pattern_from(&mut input_line.chars(), &patterns);
 	}
-	let patterns = build_patterrns(pattern);
+	let patterns = build_patterrns(pattern, &mut ors);
 	for i in 0..input_line.len() {
 		let input = &input_line[i..];
 		let mut it = input.chars();
@@ -204,7 +263,6 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
 	return false;
 }
 
-// Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
 
 	if env::args().nth(1).unwrap() != "-E" {
