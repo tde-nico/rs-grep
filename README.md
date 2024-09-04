@@ -1,5 +1,16 @@
 # rs-grep
 
+<!--
+#groups
+Tools
+
+#languages
+Rust
+
+#frames and libs
+
+-->
+
 A simple rust implementation of grep
 
 ## Info
